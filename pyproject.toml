@@ -31,7 +31,7 @@ classifiers = [
 Homepage = "https://github.com/roboes/strava-club-scraper"
 
 [project.scripts]
-strava-club-scraper = "strava_club_scraper:entrypoint"
+strava-club-scraper = "strava_club_scraper.runner:main"
 
 [tool.setuptools]
 packages = ["strava_club_scraper"]
