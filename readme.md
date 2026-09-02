@@ -54,6 +54,17 @@ And that your Strava display language is `English (US)`. To change the language,
 python -m pip install "git+https://github.com/roboes/strava-club-scraper.git@main"
 ```
 
+For a local editable install, copy `settings/config.example.ini` to `settings/config.ini`, configure the dates, timezone, and club IDs, then run this from Windows PowerShell in the project directory:
+
+```ps1
+strava-club-scraper
+```
+
+Chrome will open for manual Strava login and verification. The runner does not use `STRAVA.LOGIN` or `STRAVA.PASSWORD`; leave those settings blank or remove them. The scraped activities are saved to `output/club_activities.csv`.
+Use `TIMEZONE = WIB` for Western Indonesian Time; it is mapped to `Asia/Jakarta`. A valid, authorized Strava account with access to the clubs is still required.
+
+The runner uses a dedicated persistent Chrome profile at `~/.strava-club-scraper/chrome-profile`, so Google OAuth normally needs to be completed only on the first run. Each run asks you to confirm the browser session by pressing Enter. This profile contains sensitive session data; do not commit or share it. Close the scraper before starting another instance.
+
 ### Functions
 
 #### `strava_club_activities`
