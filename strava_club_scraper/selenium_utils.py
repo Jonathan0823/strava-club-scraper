@@ -20,6 +20,7 @@ def selenium_webdriver(*, web_browser: Literal['chrome', 'firefox'] = 'chrome', 
         webdriver_options.add_argument('--disable-blink-features=AutomationControlled')
         webdriver_options.add_argument('--disable-search-engine-choice-screen')
         webdriver_options.add_argument('--log-level=3')
+        webdriver_options.add_argument(f'--user-data-dir={os.path.join(os.path.expanduser("~"), ".strava-club-scraper", "chrome-profile")}')
         webdriver_options.add_experimental_option(
             'prefs',
             {
