@@ -60,7 +60,7 @@ For a local editable install, run this from Windows PowerShell in the project di
 strava-club-scraper --club-id 2149927 --date-min 2026-09-01 --date-max 2026-09-30 --timezone WIB
 ```
 
-Repeat `--club-id` for multiple clubs. Use `--activity-type` to filter activity types and `--output` to choose the CSV path. The default output is `output/club_activities.csv`.
+Repeat `--club-id` for multiple clubs. Use `--activity-type` to filter activity types, `--num-entries` to set the requested feed size (default: `100`), `--activity-request-delay` to set the delay between feed/activity requests (default: `5` seconds), and `--output` to choose the CSV path. Rate-limited requests are retried up to 3 times after 60, 120, and 240 seconds. The default output is `output/club_activities.csv`.
 
 Chrome will open for manual Strava login and verification. A valid, authorized Strava account with access to the clubs is still required. `WIB` is mapped to `Asia/Jakarta`.
 
@@ -71,7 +71,7 @@ The runner uses a dedicated persistent Chrome profile at `~/.strava-club-scraper
 #### `strava_club_activities`
 
 ```py
-strava_club_activities(club_ids, filter_activities_type, filter_date_min, filter_date_max, timezone='UTC')
+strava_club_activities(club_ids, filter_activities_type, filter_date_min, filter_date_max, timezone='UTC', num_entries=100, activity_request_delay=5, rate_limit_retries=3)
 ```
 
 ##### Description
@@ -85,6 +85,9 @@ strava_club_activities(club_ids, filter_activities_type, filter_date_min, filter
 - `filter_date_min`: _str_. Start date filter (e.g. `filter_date_min='2023-06-05'`).
 - `filter_date_max`: _str_. End date filter (e.g. `filter_date_max='2023-07-30'`).
 - `timezone`: _str or timezone object_, default: _'UTC'_.
+- `num_entries`: _int_, default: _100_. Number of feed entries requested from Strava.
+- `activity_request_delay`: _float_, default: _5_. Seconds between feed/activity requests.
+- `rate_limit_retries`: _int_, default: _3_. Retries after rate limiting, with delays of 60, 120, and 240 seconds.
 
 <br>
 
