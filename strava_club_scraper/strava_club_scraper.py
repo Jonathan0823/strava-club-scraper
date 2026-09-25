@@ -23,15 +23,17 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import Resource, build
 from janitor import clean_names
 from natsort import natsorted, ns
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .selenium_utils import selenium_webdriver
 
 # Functions
+
+
+RATE_LIMIT_RETRY_DELAYS = (60, 120, 240)
 
 
 def convert_list_to_dictionary(*, to_convert: list[str]) -> dict[str, str]:
@@ -59,22 +61,9 @@ def strava_authentication(*, strava_login: str | None = None, strava_password: s
     else:
         driver = selenium_webdriver()
 
-        # Open website
+        # Open website; a dedicated Chrome profile preserves the Strava/Google session.
         driver.get(url='https://www.strava.com/login')
         time.sleep(3)
-
-        try:
-            if driver.find_element(by=By.ID, value='desktop-email'):
-                pass
-
-        except NoSuchElementException:
-            while True:
-                try:
-                    driver.find_element(by=By.ID, value='desktop-email')
-                    break
-
-                except NoSuchElementException:
-                    time.sleep(2)
 
         # Reject cookies
         try:
@@ -83,7 +72,7 @@ def strava_authentication(*, strava_login: str | None = None, strava_password: s
         except NoSuchElementException:
             pass
 
-        if login_mode == 'credentials' and strava_login is not None and strava_password is not None:
+        if login_mode == 'credentials' and strava_login is not None and strava_password is not None and '/login' in driver.current_url:
             # Login
             field_login = next(element for element in driver.find_elements(by=By.XPATH, value='.//*[@data-cy="email"]') if element.is_displayed())
             field_login.send_keys(strava_login)
@@ -103,13 +92,14 @@ def strava_authentication(*, strava_login: str | None = None, strava_password: s
             del field_login, field_password
 
         else:
-            WebDriverWait(driver=driver, timeout=300).until(method=EC.url_contains(url='https://www.strava.com/dashboard'))
+            input('If needed, log in and complete verification in Chrome, then press Enter here to continue: ')
+            print('Continuing with the current Strava session.')
 
         # Return objects
         return driver
 
 
-def strava_club_activities(*, strava_login: str, strava_password: str, club_ids: list[str], filter_activities_type: str, filter_date_min: str, filter_date_max: str, timezone: str = 'UTC') -> list[dict[str, Any]]:
+def strava_club_activities(*, strava_login: str, strava_password: str, club_ids: list[str], filter_activities_type: str, filter_date_min: str, filter_date_max: str, timezone: str = 'UTC', num_entries: int = 100, activity_request_delay: float = 5, rate_limit_retries: int = 3) -> list[dict[str, Any]]:
     """
     Scraps and imports activities belonging to one or multiple Strava Club(s) (public activities or activities that the account that is scraping the data has access to) to a dataset.
 
@@ -123,6 +113,11 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
     # Settings and variables
     filter_date_min = parser.parse(filter_date_min)
     filter_date_max = parser.parse(filter_date_max)
+    filter_date_max_exclusive = filter_date_max + timedelta(days=1)
+    if not 0 <= rate_limit_retries <= len(RATE_LIMIT_RETRY_DELAYS):
+        raise ValueError(f'rate_limit_retries must be between 0 and {len(RATE_LIMIT_RETRY_DELAYS)}')
+    if activity_request_delay < 0:
+        raise ValueError('activity_request_delay must not be negative')
 
     # Strava login
     driver = strava_authentication(strava_login=strava_login, strava_password=strava_password)
@@ -130,9 +125,20 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
     data = []
 
     for club_id in club_ids:
+        print(f'Scraping club {club_id}...')
+
         # Open Strava Club activities feed page
-        driver.get(url=('https://www.strava.com/dashboard?club_id=' + club_id + '&feed_type=club&num_entries=100'))
+        driver.get(url=('https://www.strava.com/dashboard?club_id=' + club_id + '&feed_type=club&num_entries=' + str(num_entries)))
         time.sleep(3)
+
+        try:
+            WebDriverWait(driver=driver, timeout=30).until(
+                method=lambda browser: browser.find_elements(by=By.XPATH, value='//div[@data-testid="activity_entry_container"]')
+                or browser.find_elements(by=By.XPATH, value='//div[text()="No more recent activity available."]'),
+            )
+        except TimeoutException:
+            print(f'No activity feed loaded for club {club_id}; current URL: {driver.current_url}')
+            continue
 
         # Scroll to the end of the webpage
         while True:
@@ -142,15 +148,33 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
 
             except NoSuchElementException:
                 activities = driver.find_elements(by=By.XPATH, value='//div[@data-testid="activity_entry_container"]')
+                if not activities:
+                    print(f'No activities found for club {club_id}; skipping.')
+                    break
+
                 activity_date = activities[-1].find_element(by=By.XPATH, value='.//..//..//..//..//..//time').text
                 activity_date = re.sub(pattern=r'^(Today at |Today)(.*)$', repl=str(pd.Timestamp.now(tz=timezone).date()) + r' \2', string=activity_date, flags=0)
                 activity_date = re.sub(pattern=r'^(Yesterday at |Yesterday)(.*)$', repl=str(pd.Timestamp.now(tz=timezone).date() - timedelta(days=1)) + r' \2', string=activity_date, flags=0)
                 activity_date = parser.parse(activity_date)
 
                 if activity_date >= filter_date_min:
-                    # driver.execute_script(script='window.scrollTo(0, document.body.scrollHeight);')
-                    driver.execute_script('arguments[0].scrollIntoView({block: "start"});', driver.find_elements(by=By.XPATH, value='//*[@data-testid="web-feed-entry"]')[-1])
-                    time.sleep(6)
+                    feed_entries = driver.find_elements(by=By.XPATH, value='//*[@data-testid="web-feed-entry"]')
+                    if not feed_entries:
+                        print(f'Activity feed stopped loading for club {club_id}; collected entries may be incomplete.')
+                        break
+
+                    feed_entries_before = len(feed_entries)
+                    time.sleep(activity_request_delay)
+                    driver.execute_script('arguments[0].scrollIntoView({block: "start"});', feed_entries[-1])
+
+                    try:
+                        WebDriverWait(driver=driver, timeout=30).until(
+                            method=lambda browser: browser.find_elements(by=By.XPATH, value='//div[text()="No more recent activity available."]')
+                            or len(browser.find_elements(by=By.XPATH, value='//*[@data-testid="web-feed-entry"]')) > feed_entries_before,
+                        )
+                    except TimeoutException:
+                        print(f'Activity feed stopped loading for club {club_id}; collected entries may be incomplete.')
+                        break
 
                 else:
                     break
@@ -177,10 +201,35 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
 
         activities_id = natsorted(seq=set(activities_id), alg=ns.IGNORECASE)
 
-        for activity in activities_id:
+        rate_limit_hit = False
+        for activity_index, activity in enumerate(activities_id):
             d = {}
 
-            driver.get(url=('https://www.strava.com/activities/' + activity + '/overview'))
+            for retry in range(rate_limit_retries + 1):
+                if retry:
+                    time.sleep(RATE_LIMIT_RETRY_DELAYS[retry - 1])
+                elif activity_index:
+                    time.sleep(activity_request_delay)
+
+                driver.get(url=('https://www.strava.com/activities/' + activity + '/overview'))
+
+                if not driver.find_elements(by=By.XPATH, value='//pre[text()="Too Many Requests"]'):
+                    break
+
+                if retry < rate_limit_retries:
+                    print(f'Rate limited while loading activity {activity}; retrying in {RATE_LIMIT_RETRY_DELAYS[retry]} seconds.')
+            else:
+                print(f'Rate limit persisted after {rate_limit_retries} retries; stopping club {club_id}.')
+                rate_limit_hit = True
+                break
+
+            try:
+                WebDriverWait(driver=driver, timeout=30).until(
+                    method=lambda browser: browser.find_elements(by=By.XPATH, value='.//span[@class="title"]'),
+                )
+            except TimeoutException:
+                print(f'Activity {activity} did not load; skipping it.')
+                continue
 
             try:
                 driver.find_element(by=By.XPATH, value='//pre[text()="Too Many Requests"]')
@@ -455,11 +504,15 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
                 except Exception:
                     pass
 
-                # activity_kudos
-                d['activity_kudos'] = driver.find_element(by=By.XPATH, value='.//span[@data-testid="kudos_count"]').text
-                d['activity_kudos'] = int(d['activity_kudos'])
+                # activity_kudos (not displayed for every activity/account)
+                kudos = driver.find_elements(by=By.XPATH, value='.//span[@data-testid="kudos_count"]')
+                d['activity_kudos'] = int(kudos[0].text) if kudos and kudos[0].text else 0
 
                 data.append(d)
+
+        if rate_limit_hit:
+            print(f'Club {club_id} was only partially scraped because Strava kept rate limiting requests.')
+            break
 
     # Create DataFrame
     club_activities_df = pd.DataFrame(data=data, index=None, dtype=None)
@@ -562,7 +615,7 @@ def strava_club_activities(*, strava_login: str, strava_password: str, club_ids:
 
     # Filter date interval
     if filter_date_min is not None and filter_date_max is not None:
-        club_activities_df = club_activities_df.query(expr='activity_date >= @filter_date_min & activity_date <= @filter_date_max').reset_index(level=None, drop=True, names=None)
+        club_activities_df = club_activities_df.query(expr='activity_date >= @filter_date_min & activity_date < @filter_date_max_exclusive').reset_index(level=None, drop=True, names=None)
 
     # Rearrange rows
     club_activities_df = club_activities_df.sort_values(by=['club_id', 'activity_date'], ignore_index=True)
